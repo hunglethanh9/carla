@@ -136,16 +136,19 @@ def get_actor_display_name(actor, truncate=250):
 
 
 class World(object):
-    def __init__(self, carla_world, hud, actor_filter):
+    def __init__(self, carla_world, hud, actor_filter, actor_spawnpoint, has_lidar_sensor):
         self.world = carla_world
         self.hud = hud
         self.player = None
         self.collision_sensor = None
         self.lane_invasion_sensor = None
         self.camera_manager = None
+        self.lidar_sensor = None
         self._weather_presets = find_weather_presets()
         self._weather_index = 0
         self._actor_filter = actor_filter
+        self._actor_spawnpoint = actor_spawnpoint
+        self._has_lidar_sensor = has_lidar_sensor
         self.restart()
         self.world.on_tick(hud.on_world_tick)
 
@@ -160,20 +163,33 @@ class World(object):
             color = random.choice(blueprint.get_attribute('color').recommended_values)
             blueprint.set_attribute('color', color)
         # Spawn the player.
-        if self.player is not None:
-            spawn_point = self.player.get_transform()
-            spawn_point.location.z += 2.0
-            spawn_point.rotation.roll = 0.0
-            spawn_point.rotation.pitch = 0.0
-            self.destroy()
-            self.player = self.world.try_spawn_actor(blueprint, spawn_point)
-        while self.player is None:
-            spawn_points = self.world.get_map().get_spawn_points()
-            spawn_point = random.choice(spawn_points) if spawn_points else carla.Transform()
-            self.player = self.world.try_spawn_actor(blueprint, spawn_point)
+        if self._actor_spawnpoint:
+            spawn_point = carla.Transform()
+            spawn_point.location.x = self._actor_spawnpoint[0]
+            spawn_point.location.y = self._actor_spawnpoint[1]
+            spawn_point.location.z = self._actor_spawnpoint[2]
+            spawn_point.rotation.yaw = self._actor_spawnpoint[3]
+            if self.player is not None:
+                self.destroy()
+            while self.player is None:
+                self.player = self.world.try_spawn_actor(blueprint, spawn_point)
+        else:
+            if self.player is not None:
+                spawn_point = self.player.get_transform()
+                spawn_point.location.z += 2.0
+                spawn_point.rotation.roll = 0.0
+                spawn_point.rotation.pitch = 0.0
+                self.destroy()
+                self.player = self.world.try_spawn_actor(blueprint, spawn_point)
+            while self.player is None:
+                spawn_points = self.world.get_map().get_spawn_points()
+                spawn_point = random.choice(spawn_points) if spawn_points else carla.Transform()
+                self.player = self.world.try_spawn_actor(blueprint, spawn_point)
         # Set up the sensors.
         self.collision_sensor = CollisionSensor(self.player, self.hud)
         self.lane_invasion_sensor = LaneInvasionSensor(self.player, self.hud)
+        if self._has_lidar_sensor:
+            self.lidar_sensor = LidarSensor(self.player)
         self.camera_manager = CameraManager(self.player, self.hud)
         self.camera_manager._transform_index = cam_pos_index
         self.camera_manager.set_sensor(cam_index, notify=False)
@@ -199,6 +215,7 @@ class World(object):
             self.camera_manager.sensor,
             self.collision_sensor.sensor,
             self.lane_invasion_sensor.sensor,
+            self.lidar_sensor.sensor,
             self.player]
         for actor in actors:
             if actor is not None:
@@ -567,6 +584,21 @@ class LaneInvasionSensor(object):
 
 
 # ==============================================================================
+# -- LidarSensor --------------------------------------------------------
+# ==============================================================================
+
+class LidarSensor(object):
+    def __init__(self, parent_actor):
+        self.sensor = None
+        self._parent = parent_actor
+        world = self._parent.get_world()
+        bp = world.get_blueprint_library().find('sensor.lidar.ray_cast')
+        bp.set_attribute('range', '5000')
+        bp.set_attribute('role_name', 'sensor')
+        self.sensor = world.spawn_actor(bp, carla.Transform(carla.Location(x=1.0, z=2.0)), attach_to=self._parent)
+
+
+# ==============================================================================
 # -- CameraManager -------------------------------------------------------------
 # ==============================================================================
 
@@ -599,6 +631,7 @@ class CameraManager(object):
                 bp.set_attribute('image_size_y', str(hud.dim[1]))
             elif item[0].startswith('sensor.lidar'):
                 bp.set_attribute('range', '5000')
+            bp.set_attribute('role_name', 'view')
             item.append(bp)
         self._index = None
 
@@ -685,7 +718,7 @@ def game_loop(args):
             pygame.HWSURFACE | pygame.DOUBLEBUF)
 
         hud = HUD(args.width, args.height)
-        world = World(client.get_world(), hud, args.filter)
+        world = World(client.get_world(), hud, args.filter, args.spawnpoint, args.lidarsensor)
         controller = KeyboardControl(world, args.autopilot)
 
         clock = pygame.time.Clock()
@@ -743,6 +776,16 @@ def main():
         metavar='PATTERN',
         default='vehicle.*',
         help='actor filter (default: "vehicle.*")')
+    argparser.add_argument(
+        '--spawnpoint',
+        nargs=4,
+        metavar='X Y Z YAW',
+        type=float,
+        help='spawn point (default: random)')
+    argparser.add_argument(
+        '--lidarsensor',
+        action='store_true',
+        help='enable lidarSensor (default: false)')
     args = argparser.parse_args()
 
     args.width, args.height = [int(x) for x in args.res.split('x')]
